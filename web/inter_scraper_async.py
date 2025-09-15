@@ -23,6 +23,7 @@ class AsyncInterScraper:
         self.max_concurrency = max(1, int(max_concurrency))
         self.slow_mo = slow_mo if headless else max(slow_mo, 100)
         self.retries = max(0, int(retries))
+        self._retries = self.retries  # maintain compatibility with existing references
         self.timeout = int(timeout_ms)
         self.block_resources = block_resources
         self.debug = debug
