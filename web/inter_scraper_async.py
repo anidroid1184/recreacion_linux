@@ -17,26 +17,28 @@ class AsyncInterScraper:
     """
 
     def __init__(self, headless: bool = True, max_concurrency: int = 3, slow_mo: int = 0,
-                 retries: int = 2, timeout_ms: int = 30000, block_resources: bool = True):
-        self._headless = headless
-        self._max_concurrency = max(1, int(max_concurrency))
-        self._slow_mo = slow_mo if headless else max(slow_mo, 100)
-        self._retries = max(0, int(retries))
-        self._timeout = int(timeout_ms)
-        self._block_resources = block_resources
+                 retries: int = 2, timeout_ms: int = 30000, block_resources: bool = True,
+                 debug: bool = False):
+        self.headless = headless
+        self.max_concurrency = max(1, int(max_concurrency))
+        self.slow_mo = slow_mo if headless else max(slow_mo, 100)
+        self.retries = max(0, int(retries))
+        self.timeout = int(timeout_ms)
+        self.block_resources = block_resources
+        self.debug = debug
         self._pw = None
         self.browser = None
-        self._sem = asyncio.Semaphore(self._max_concurrency)
+        self._sem = asyncio.Semaphore(self.max_concurrency)
 
     async def start(self):
         logging.info("[PW] Starting async_playwright...")
         self._pw = await async_playwright().start()
-        logging.info("[PW] Launching Chromium. headless=%s", self._headless)
+        logging.info("[PW] Launching Chromium. headless=%s", self.headless)
         launch_args = ["--no-sandbox", "--disable-dev-shm-usage"]
-        if not self._headless:
+        if not self.headless:
             launch_args.append("--start-maximized")
-        self.browser = await self._pw.chromium.launch(headless=self._headless, slow_mo=self._slow_mo, args=launch_args)
-        logging.info("[PW] Chromium launched. slow_mo=%s", self._slow_mo)
+        self.browser = await self._pw.chromium.launch(headless=self.headless, slow_mo=self.slow_mo, args=launch_args)
+        logging.info("[PW] Chromium launched. slow_mo=%s", self.slow_mo)
 
     async def close(self):
         with suppress(Exception):
@@ -51,16 +53,16 @@ class AsyncInterScraper:
     async def _extract_status_from_page(self, page) -> str:
         # Wait basic load
         with suppress(PlaywrightTimeoutError):
-            logging.debug("[PW] Waiting for DOMContentLoaded (timeout=%sms)", self._timeout)
-            await page.wait_for_load_state("domcontentloaded", timeout=self._timeout)
+            logging.debug("[PW] Waiting for DOMContentLoaded (timeout=%sms)", self.timeout)
+            await page.wait_for_load_state("domcontentloaded", timeout=self.timeout)
         # Anchor to the title and read the following bold text
         try:
             title = page.locator("css=div.content p.title-current-state").first
             logging.debug("[PW] Waiting title-current-state visible")
-            await title.wait_for(state="visible", timeout=self._timeout)
+            await title.wait_for(state="visible", timeout=self.timeout)
             value = title.locator("xpath=following-sibling::p[contains(@class,'font-weight-600')][1]")
             logging.debug("[PW] Waiting value (font-weight-600) visible")
-            await value.wait_for(state="visible", timeout=self._timeout)
+            await value.wait_for(state="visible", timeout=self.timeout)
             txt = (await value.inner_text()).strip()
             if txt:
                 logging.debug("[PW] Extracted status via primary locator: %s", txt)
@@ -73,10 +75,10 @@ class AsyncInterScraper:
                 "xpath=(//*[self::p or self::h1 or self::h2 or self::div][contains(normalize-space(.), 'Estado actual de tu envío')])[1]"
             )
             logging.debug("[PW] Waiting alternative title text visible")
-            await title_by_text.wait_for(state="visible", timeout=min(6000, self._timeout))
+            await title_by_text.wait_for(state="visible", timeout=min(6000, self.timeout))
             value = title_by_text.locator("xpath=following::p[contains(@class,'font-weight-600')][1]")
             logging.debug("[PW] Waiting value (alt) visible")
-            await value.wait_for(state="visible", timeout=min(6000, self._timeout))
+            await value.wait_for(state="visible", timeout=min(6000, self.timeout))
             txt = (await value.inner_text()).strip()
             if txt:
                 logging.debug("[PW] Extracted status via alt locator: %s", txt)
@@ -87,7 +89,7 @@ class AsyncInterScraper:
         with suppress(Exception):
             value2 = page.locator("css=div.content p.font-weight-600").first
             logging.debug("[PW] Waiting fallback value visible")
-            await value2.wait_for(state="visible", timeout=min(5000, self._timeout))
+            await value2.wait_for(state="visible", timeout=min(5000, self.timeout))
             txt2 = (await value2.inner_text()).strip()
             if txt2:
                 logging.debug("[PW] Extracted status via fallback: %s", txt2)
@@ -95,7 +97,7 @@ class AsyncInterScraper:
         # Last resort: novelty pill
         with suppress(Exception):
             novelty = page.locator("css=p.guide-WhitOut-Novelty").first
-            await novelty.wait_for(state="visible", timeout=min(3000, self._timeout))
+            await novelty.wait_for(state="visible", timeout=min(3000, self.timeout))
             txt3 = (await novelty.inner_text()).strip()
             if txt3:
                 return txt3
@@ -107,7 +109,7 @@ class AsyncInterScraper:
         popup = None
         try:
             # New context per guide
-            if self._headless:
+            if self.headless:
                 logging.debug("[PW] Creating new context (headless) for %s", tracking_number)
                 context = await self.browser.new_context(viewport={"width": 1280, "height": 800})
             else:
@@ -115,7 +117,7 @@ class AsyncInterScraper:
                 context = await self.browser.new_context(viewport=None)
 
             # Block heavy resources to speed up
-            if self._block_resources:
+            if self.block_resources:
                 async def _route_handler(route):
                     try:
                         if route.request.resource_type in {"image", "media", "font", "stylesheet"}:
@@ -131,7 +133,8 @@ class AsyncInterScraper:
             logging.info("[PW] [%-14s] New page", tracking_number)
             page = await context.new_page()
             logging.debug("[PW] [%s] Navigating to tracking page", tracking_number)
-            await page.goto("https://interrapidisimo.com/sigue-tu-envio/", timeout=max(45000, self._timeout), wait_until="domcontentloaded")
+            await page.goto("https://interrapidisimo.com/sigue-tu-envio/", timeout=max(45000, self.timeout), wait_until="domcontentloaded")
+            await page.goto("https://interrapidisimo.com/sigue-tu-envio/", timeout=max(45000, self.timeout), wait_until="domcontentloaded")
 
             # Try to accept cookie banners quickly
             with suppress(Exception):
@@ -228,3 +231,23 @@ class AsyncInterScraper:
 
         await asyncio.gather(*tasks)
         return results
+
+    async def _dump_debug(self, page, tracking_number: str, reason: str = ""):
+        """Dump HTML and screenshot to logs/ for troubleshooting."""
+        try:
+            from datetime import datetime
+            import os
+            ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+            logs_dir = os.path.join(os.getcwd(), "logs")
+            os.makedirs(logs_dir, exist_ok=True)
+            base = os.path.join(logs_dir, f"debug_{tracking_number}_{ts}_{reason}")
+            # HTML
+            html_path = base + ".html"
+            content = await page.content()
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            # Screenshot
+            png_path = base + ".png"
+            await page.screenshot(path=png_path, full_page=True)
+        except Exception:
+            pass

@@ -167,12 +167,19 @@ async def update_statuses_linux(
     processed_total = 0
 
     # Single browser instance across all batches to reduce overhead
+    # Debug and resource flags from environment (default: debug off, block resources on)
+    debug_flag = os.getenv("DEBUG_SCRAPER", "false").strip().lower() in {"1", "true", "yes"}
+    block_flag = os.getenv("BLOCK_RESOURCES", "true").strip().lower() not in {"0", "false", "no"}
+    logging.info("Scraper flags: DEBUG_SCRAPER=%s, BLOCK_RESOURCES=%s", debug_flag, block_flag)
+
     scraper = AsyncInterScraper(
-        headless=headless,
+        headless=bool(settings.HEADLESS),
         max_concurrency=max_concurrency,
+        slow_mo=0,
         retries=retries,
         timeout_ms=timeout_ms,
-        block_resources=True,
+        block_resources=block_flag,
+        debug=debug_flag,
     )
     await scraper.start()
     try:
