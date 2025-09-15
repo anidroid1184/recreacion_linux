@@ -1,0 +1,364 @@
+from __future__ import annotations
+import argparse
+import asyncio
+import logging
+import os
+import sys
+from contextlib import suppress
+from typing import Any, Iterable
+
+# Ensure project root is on sys.path when running from recreacion_linux/
+PROJECT_ROOT = os.path.dirname(os.path.dirname(__file__))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from oauth2client.service_account import ServiceAccountCredentials
+from recreacion_linux.config import settings
+from recreacion_linux.services.sheets_client import SheetsClient
+from recreacion_linux.web.inter_scraper_async import AsyncInterScraper
+from recreacion_linux.logging_setup import setup_file_logging
+from recreacion_linux.services.tracker_service import TrackerService
+from recreacion_linux.comparer import compare_statuses
+from recreacion_linux.report import generate_daily_report
+
+
+def load_credentials() -> ServiceAccountCredentials:
+    scope = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/drive.file",
+    ]
+    # credentials.json must be present in the project root (outside git)
+    creds = ServiceAccountCredentials.from_json_keyfile_name(
+        os.path.join(PROJECT_ROOT, "credentials.json"), scope
+    )
+    return creds
+
+
+def _flush_batch(sheets: SheetsClient, batch_updates: list[tuple[int, list[Any]]]):
+    """Write only the exact cells that changed (single-column updates batched).
+
+    Groups updates by column index and splits into consecutive row blocks.
+    This preserves other columns and reduces API calls.
+    """
+    if not batch_updates:
+        return
+
+    # Build mapping: col_idx -> list[(row, value)]
+    by_col: dict[int, list[tuple[int, Any]]] = {}
+    for row, arr in batch_updates:
+        for col_idx, val in enumerate(arr, start=1):
+            if val is None:
+                continue
+            by_col.setdefault(col_idx, []).append((row, val))
+
+    batched_payload: list[dict] = []
+    for col_idx, items in by_col.items():
+        items.sort(key=lambda x: x[0])
+        block: list[tuple[int, Any]] = []
+        prev_row = None
+
+        def flush_block():
+            if not block:
+                return
+            start_row = block[0][0]
+            end_row = block[-1][0]
+            values = [[v] for _, v in block]  # single column
+            col_letter = chr(ord('A') + col_idx - 1)
+            a1 = f"{col_letter}{start_row}:{col_letter}{end_row}"
+            batched_payload.append({"range": a1, "values": values})
+
+        for r, v in items:
+            if prev_row is None or r == prev_row + 1:
+                block.append((r, v))
+            else:
+                flush_block()
+                block = [(r, v)]
+            prev_row = r
+        flush_block()
+
+    if batched_payload:
+        CHUNK = 100
+        for i in range(0, len(batched_payload), CHUNK):
+            chunk = batched_payload[i:i+CHUNK]
+            sheets.values_batch_update(chunk)
+
+
+async def update_statuses_linux(
+    sheets: SheetsClient,
+    headless: bool = True,
+    start_row: int = 2,
+    end_row: int | None = None,
+    only_empty: bool = False,
+    max_concurrency: int = 2,
+    rps: float | None = 0.8,
+    retries: int = 1,
+    timeout_ms: int = 25000,
+    batch_size: int = 1500,
+    sleep_between_batches: float = 15.0,
+) -> None:
+    """Linux-optimized updater using AsyncInterScraper with low memory footprint.
+
+    - Uses small concurrency and throttling to fit in ~4GB RAM environments.
+    - Blocks heavy resources (images, media, fonts, CSS) to speed up page load.
+    - Writes only non-empty statuses to avoid overwriting existing data.
+    """
+    # Read sheet
+    records = sheets.read_main_records_resilient()
+    headers = sheets.read_headers()
+
+    # Ensure required headers exist
+    required_headers = ["ID DROPI", "ID TRACKING", "STATUS DROPI", "STATUS TRACKING", "Alerta"]
+    sheets.ensure_headers(required_headers)
+    headers = sheets.read_headers()
+
+    web_col = headers.index("STATUS TRACKING") + 1
+    raw_col = headers.index("STATUS TRACKING RAW") + 1 if "STATUS TRACKING RAW" in headers else None
+    dropi_col = headers.index("STATUS DROPI") + 1 if "STATUS DROPI" in headers else None
+    alerta_col = headers.index("Alerta") + 1 if "Alerta" in headers else None
+
+    # Prepare items
+    items: list[tuple[int, str]] = []  # (row, tracking)
+    for idx, rec in enumerate(records, start=2):
+        if idx < start_row:
+            continue
+        if end_row is not None and idx > end_row:
+            break
+        tn = str(rec.get("ID TRACKING", "")).strip()
+        if not tn:
+            continue
+        if only_empty:
+            current_web = str(rec.get("STATUS TRACKING", "")).strip()
+            if current_web:
+                continue
+        items.append((idx, tn))
+
+    if not items:
+        logging.info("No rows to process based on current filters")
+        return
+
+    # Helper to chunk
+    def chunk(seq: list[tuple[int, str]], size: int):
+        for i in range(0, len(seq), size):
+            yield seq[i:i+size]
+
+    processed_total = 0
+
+    # Single browser instance across all batches to reduce overhead
+    scraper = AsyncInterScraper(
+        headless=headless,
+        max_concurrency=max_concurrency,
+        retries=retries,
+        timeout_ms=timeout_ms,
+        block_resources=True,
+    )
+    await scraper.start()
+    try:
+        for batch_idx, batch in enumerate(chunk(items, max(1, int(batch_size))), start=1):
+            first_row = batch[0][0]
+            last_row = batch[-1][0]
+            logging.info("[Batch %d] rows %s-%s, items=%d", batch_idx, first_row, last_row, len(batch))
+
+            tn_list = [tn for _, tn in batch]
+            results = await scraper.get_status_many(tn_list, rps=rps)
+            status_by_tn = {tn: raw for tn, raw in results}
+
+            # Quick second pass for blanks in this batch (keep same constraints)
+            missing = [tn for tn in tn_list if not (status_by_tn.get(tn) or "").strip()]
+            if missing:
+                logging.info("[Batch %d] second pass for %d missing", batch_idx, len(missing))
+                results2 = await scraper.get_status_many(missing, rps=(rps or 0.6))
+                for tn, raw in results2:
+                    if raw:
+                        status_by_tn[tn] = raw
+
+            # Build batched updates
+            batch_updates: list[tuple[int, list[Any]]] = []
+            for (row_idx, tn) in batch:
+                raw = (status_by_tn.get(tn) or "").strip()
+                if not raw:
+                    continue
+
+                # Normalize using TrackerService mapping
+                norm = TrackerService.normalize_status(raw)
+
+                # Build row updates up to the furthest column we'll touch
+                max_col = web_col
+                if raw_col:
+                    max_col = max(max_col, raw_col)
+                if alerta_col:
+                    max_col = max(max_col, alerta_col)
+                row_updates = [None] * max_col
+
+                # Write normalized tracking status
+                row_updates[web_col - 1] = norm
+
+                # Optionally write raw into STATUS TRACKING RAW if present
+                if raw_col:
+                    row_updates[raw_col - 1] = raw
+
+                # Optionally recompute Alerta if both DROPi and normalized tracking are available
+                if alerta_col:
+                    # Read DROPi from current records array (we have it as rec) using index from headers
+                    try:
+                        # records is aligned with row indices starting at 2
+                        rec = records[row_idx - 2]
+                        dropi_raw = str(rec.get("STATUS DROPI", "")).strip()
+                        dropi_norm = TrackerService.normalize_status(dropi_raw) if dropi_raw else ""
+                        alerta = TrackerService.compute_alert(dropi_norm or "", norm or "")
+                        row_updates[alerta_col - 1] = alerta
+                    except Exception:
+                        # Be permissive: if anything fails, skip alerta update for this row
+                        pass
+
+                batch_updates.append((row_idx, row_updates))
+
+            if batch_updates:
+                _flush_batch(sheets, batch_updates)
+
+            processed_total += len(batch)
+            logging.info("[Batch %d] done. processed_total=%d", batch_idx, processed_total)
+
+            if sleep_between_batches and processed_total < len(items):
+                with suppress(Exception):
+                    await asyncio.sleep(float(sleep_between_batches))
+    finally:
+        await scraper.close()
+
+
+def str2bool(v: str) -> bool:
+    return str(v).lower() in {"1", "true", "yes", "y"}
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Linux-optimized processes (headless, file-logs only)"
+    )
+
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    # scrape
+    p_scrape = sub.add_parser("scrape", help="Scrape Inter and write statuses to sheet")
+    p_scrape.add_argument("--start-row", type=int, default=2)
+    p_scrape.add_argument("--end-row", type=int, default=None)
+    p_scrape.add_argument("--only-empty", type=str2bool, default=True)
+    p_scrape.add_argument("--max-concurrency", type=int, default=2)
+    p_scrape.add_argument("--rps", type=float, default=0.8)
+    p_scrape.add_argument("--retries", type=int, default=1)
+    p_scrape.add_argument("--timeout-ms", dest="timeout_ms", type=int, default=25000)
+    p_scrape.add_argument("--batch-size", type=int, default=1500)
+    p_scrape.add_argument("--sleep-between-batches", type=float, default=15.0)
+
+    # compare
+    p_compare = sub.add_parser("compare", help="Compare DROPi vs WEB statuses and print count; results used by report")
+    p_compare.add_argument("--start-row", type=int, default=2)
+    p_compare.add_argument("--end-row", type=int, default=None)
+    p_compare.add_argument("--only-mismatches", type=str2bool, default=True)
+
+    # report
+    p_report = sub.add_parser("report", help="Generate/append daily report sheet with mismatches")
+    p_report.add_argument("--start-row", type=int, default=2)
+    p_report.add_argument("--end-row", type=int, default=None)
+    p_report.add_argument("--only-mismatches", type=str2bool, default=True)
+    p_report.add_argument("--prefix", type=str, default=None)
+
+    # all
+    p_all = sub.add_parser("all", help="Run scrape then report")
+    p_all.add_argument("--start-row", type=int, default=2)
+    p_all.add_argument("--end-row", type=int, default=None)
+    p_all.add_argument("--only-empty", type=str2bool, default=True)
+    p_all.add_argument("--max-concurrency", type=int, default=2)
+    p_all.add_argument("--rps", type=float, default=0.8)
+    p_all.add_argument("--retries", type=int, default=1)
+    p_all.add_argument("--timeout-ms", dest="timeout_ms", type=int, default=25000)
+    p_all.add_argument("--batch-size", type=int, default=1500)
+    p_all.add_argument("--sleep-between-batches", type=float, default=15.0)
+    p_all.add_argument("--only-mismatches", type=str2bool, default=True)
+    p_all.add_argument("--prefix", type=str, default=None)
+
+    return parser
+
+
+def main() -> int:
+    parser = _build_parser()
+    args = parser.parse_args()
+
+    log_path = setup_file_logging()
+    logging.info("Linux runner started. Log file: %s", log_path)
+
+    try:
+        creds = load_credentials()
+        sheets = SheetsClient(creds, settings.spreadsheet_name)
+
+        if args.command == "scrape":
+            asyncio.run(update_statuses_linux(
+                sheets,
+                headless=True,
+                start_row=args.start_row,
+                end_row=args.end_row,
+                only_empty=args.only_empty,
+                max_concurrency=args.max_concurrency,
+                rps=args.rps,
+                retries=args.retries,
+                timeout_ms=args.timeout_ms,
+                batch_size=args.batch_size,
+                sleep_between_batches=args.sleep_between_batches,
+            ))
+            logging.info("Scrape finished successfully")
+            return 0
+
+        if args.command == "compare":
+            diffs = compare_statuses(
+                sheets,
+                start_row=args.start_row,
+                end_row=args.end_row,
+                only_mismatches=args.only_mismatches,
+            )
+            logging.info("Compare finished. Differences: %d", len(diffs))
+            return 0
+
+        if args.command == "report":
+            name = generate_daily_report(
+                sheets,
+                start_row=args.start_row,
+                end_row=args.end_row,
+                only_mismatches=args.only_mismatches,
+                prefix=getattr(args, "prefix", None),
+            )
+            logging.info("Report finished. Sheet: %s", name)
+            return 0
+
+        if args.command == "all":
+            asyncio.run(update_statuses_linux(
+                sheets,
+                headless=True,
+                start_row=args.start_row,
+                end_row=args.end_row,
+                only_empty=args.only_empty,
+                max_concurrency=args.max_concurrency,
+                rps=args.rps,
+                retries=args.retries,
+                timeout_ms=args.timeout_ms,
+                batch_size=args.batch_size,
+                sleep_between_batches=args.sleep_between_batches,
+            ))
+            name = generate_daily_report(
+                sheets,
+                start_row=args.start_row,
+                end_row=args.end_row,
+                only_mismatches=args.only_mismatches,
+                prefix=getattr(args, "prefix", None),
+            )
+            logging.info("All finished. Report sheet: %s", name)
+            return 0
+
+        parser.print_help()
+        return 2
+    except Exception as e:
+        logging.exception("Fatal error in Linux runner: %s", e)
+        return 2
+    finally:
+        logging.info("Linux runner finished")
+
+if __name__ == "__main__":
+    raise SystemExit(main())

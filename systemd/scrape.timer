@@ -1,0 +1,10 @@
+[Unit]
+Description=Recreacion Linux - Schedule scraping periodically
+
+[Timer]
+OnCalendar=*-*-* 06..22:00/30:00
+Persistent=true
+Unit=scrape.service
+
+[Install]
+WantedBy=timers.target

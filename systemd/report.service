@@ -1,0 +1,18 @@
+[Unit]
+Description=Recreacion Linux - Generate daily report with mismatches
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/recreacion_linux_repo
+ExecStart=/bin/bash -lc 'if [[ -f .venv/bin/activate ]]; then source .venv/bin/activate; fi; bash recreacion_linux/scripts/report.sh'
+EnvironmentFile=-/opt/recreacion_linux_repo/.env
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

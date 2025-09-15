@@ -1,0 +1,22 @@
+[Unit]
+Description=Recreacion Linux - Scrape Inter statuses and write to Sheets
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# CHANGE THIS to your repo absolute path
+WorkingDirectory=/opt/recreacion_linux_repo
+# Activate venv if present and run script
+ExecStart=/bin/bash -lc 'if [[ -f .venv/bin/activate ]]; then source .venv/bin/activate; fi; bash recreacion_linux/scripts/scrape.sh'
+# Inherit environment from .env at repo root if you want
+EnvironmentFile=-/opt/recreacion_linux_repo/.env
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
