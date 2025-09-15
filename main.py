@@ -172,8 +172,16 @@ async def update_statuses_linux(
     block_flag = os.getenv("BLOCK_RESOURCES", "true").strip().lower() not in {"0", "false", "no"}
     logging.info("Scraper flags: DEBUG_SCRAPER=%s, BLOCK_RESOURCES=%s", debug_flag, block_flag)
 
+    # Robust headless resolution (support older configs that may miss HEADLESS)
+    try:
+        headless_flag = bool(settings.HEADLESS)  # type: ignore[attr-defined]
+    except Exception:
+        headless_env = os.getenv("HEADLESS", "true").strip().lower()
+        headless_flag = headless_env in {"1", "true", "yes"}
+    logging.info("Effective HEADLESS=%s", headless_flag)
+
     scraper = AsyncInterScraper(
-        headless=bool(settings.HEADLESS),
+        headless=headless_flag,
         max_concurrency=max_concurrency,
         slow_mo=0,
         retries=retries,
