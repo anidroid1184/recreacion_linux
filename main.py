@@ -28,11 +28,33 @@ def load_credentials() -> ServiceAccountCredentials:
         "https://www.googleapis.com/auth/drive",
         "https://www.googleapis.com/auth/drive.file",
     ]
-    # credentials.json must be present in the project root (outside git)
-    creds = ServiceAccountCredentials.from_json_keyfile_name(
-        os.path.join(PROJECT_ROOT, "credentials.json"), scope
+
+    # Prefer explicit env vars
+    env_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or os.getenv("CREDENTIALS_PATH")
+    if env_path:
+        env_path = os.path.normpath(os.path.expandvars(os.path.expanduser(env_path)))
+        if os.path.isfile(env_path):
+            logging.info("Using credentials from env path: %s", env_path)
+            return ServiceAccountCredentials.from_json_keyfile_name(env_path, scope)
+
+    # Candidate fallback paths
+    pkg_dir = os.path.dirname(__file__)
+    cwd = os.getcwd()
+    candidates = [
+        os.path.join(pkg_dir, "credentials.json"),          # running from recreacion_linux/
+        os.path.join(PROJECT_ROOT, "credentials.json"),     # parent project root
+        os.path.join(cwd, "credentials.json"),              # current working directory
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            logging.info("Using credentials from: %s", path)
+            return ServiceAccountCredentials.from_json_keyfile_name(path, scope)
+
+    logging.error(
+        "credentials.json not found. Tried env GOOGLE_APPLICATION_CREDENTIALS/CREDENTIALS_PATH and paths: %s",
+        candidates,
     )
-    return creds
+    raise FileNotFoundError("credentials.json not found; place it at project root or set GOOGLE_APPLICATION_CREDENTIALS")
 
 
 def _flush_batch(sheets: SheetsClient, batch_updates: list[tuple[int, list[Any]]]):
