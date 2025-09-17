@@ -10,8 +10,11 @@ from typing import Any
 
 # Ensure project root is on sys.path when running from recreacion_linux/
 PROJECT_ROOT = os.path.dirname(os.path.dirname(__file__))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
+# We need the parent directory of the package on sys.path so that
+# 'import recreacion_linux.*' resolves correctly when running this file directly.
+PACKAGE_PARENT = os.path.dirname(PROJECT_ROOT)
+if PACKAGE_PARENT not in sys.path:
+    sys.path.insert(0, PACKAGE_PARENT)
 
 from recreacion_linux.logging_setup import setup_file_logging
 from recreacion_linux.config import settings
