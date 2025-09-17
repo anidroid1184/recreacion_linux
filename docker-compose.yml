@@ -2,8 +2,8 @@
 services:
   app:
     build:
-      context: ..
-      dockerfile: recreacion_linux/Dockerfile
+      context: .
+      dockerfile: Dockerfile
     image: dropi-inter:latest
     working_dir: /app
     user: "pwuser"

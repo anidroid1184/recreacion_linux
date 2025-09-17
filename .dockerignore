@@ -1,0 +1,21 @@
+# Ignore local caches, venvs, logs and outputs from build context
+# This prevents permission issues like "open /root/.cache: permission denied"
+
+# Python caches and venvs
+__pycache__/
+*.pyc
+.venv/
+
+# Common cache directories
+.cache/
+**/.cache/
+
+# Local outputs
+out/
+logs/
+nohup.out
+*.log
+
+# VCS and misc
+.git/
+.gitignore
