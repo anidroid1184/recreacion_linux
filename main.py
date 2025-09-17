@@ -1,6 +1,7 @@
 from __future__ import annotations
 import argparse
 import asyncio
+import csv
 import logging
 import os
 import sys
@@ -356,6 +357,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p_scrape.add_argument("--batch-size", type=int, default=1500)
     p_scrape.add_argument("--sleep-between-batches", type=float, default=15.0)
 
+    # scrape-to-csv (standalone sample to CSV)
+    p_scrape_csv = sub.add_parser("scrape-to-csv", help="Scrape a small sample and write results to a local CSV (no sheet writes)")
+    p_scrape_csv.add_argument("--out", dest="out_csv", type=str, default="recreacion_linux/out/sample_statuses.csv")
+    p_scrape_csv.add_argument("--count", type=int, default=4)
+    p_scrape_csv.add_argument("--start-row", type=int, default=2)
+    p_scrape_csv.add_argument("--max-concurrency", type=int, default=1)
+    p_scrape_csv.add_argument("--rps", type=float, default=0.6)
+    p_scrape_csv.add_argument("--retries", type=int, default=2)
+    p_scrape_csv.add_argument("--timeout-ms", dest="timeout_ms", type=int, default=60000)
+
     # compare
     p_compare = sub.add_parser("compare", help="Compare DROPi vs WEB statuses and print count; results used by report")
     p_compare.add_argument("--start-row", type=int, default=2)
@@ -417,6 +428,94 @@ def main() -> int:
                 sleep_between_batches=args.sleep_between_batches,
             ))
             logging.info("Scrape finished successfully")
+            return 0
+
+        if args.command == "scrape-to-csv":
+            # Detailed, step-by-step logs
+            logging.info("[scrape-to-csv] Starting. out=%s count=%s start_row=%s", args.out_csv, args.count, args.start_row)
+            # Read sheet data
+            records = sheets.read_main_records_resilient()
+            headers = sheets.read_headers()
+            logging.info("[scrape-to-csv] Headers detected: %s", headers)
+
+            # Resolve tracking column
+            try:
+                tn_col_idx = headers.index("ID TRACKING")
+                logging.info("[scrape-to-csv] Found 'ID TRACKING' at index %d", tn_col_idx)
+            except ValueError:
+                logging.error("[scrape-to-csv] Header 'ID TRACKING' not found")
+                return 2
+
+            # Build items from first rows
+            items: list[tuple[int, str]] = []
+            for idx, rec in enumerate(records, start=2):
+                if idx < args.start_row:
+                    continue
+                tn = str(rec.get("ID TRACKING", "")).strip()
+                if tn:
+                    items.append((idx, tn))
+                if len(items) >= int(args.count):
+                    break
+            logging.info("[scrape-to-csv] Sample size: %d", len(items))
+            if not items:
+                logging.warning("[scrape-to-csv] No tracking numbers found to process")
+                os.makedirs(os.path.dirname(args.out_csv) or ".", exist_ok=True)
+                with open(args.out_csv, "w", newline="", encoding="utf-8") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["row", "tracking", "status_raw", "status_normalized"])
+                print(args.out_csv)
+                return 0
+
+            # Resolve flags
+            debug_flag = os.getenv("DEBUG_SCRAPER", "false").strip().lower() in {"1", "true", "yes"}
+            block_flag = os.getenv("BLOCK_RESOURCES", "true").strip().lower() not in {"0", "false", "no"}
+            try:
+                headless_flag = bool(settings.HEADLESS)  # type: ignore[attr-defined]
+            except Exception:
+                headless_env = os.getenv("HEADLESS", "true").strip().lower()
+                headless_flag = headless_env in {"1", "true", "yes"}
+            logging.info("[scrape-to-csv] Flags: DEBUG_SCRAPER=%s BLOCK_RESOURCES=%s HEADLESS=%s", debug_flag, block_flag, headless_flag)
+
+            async def _run() -> None:
+                scraper = AsyncInterScraper(
+                    headless=headless_flag,
+                    max_concurrency=int(args.max_concurrency),
+                    slow_mo=0,
+                    retries=int(args.retries),
+                    timeout_ms=int(args.timeout_ms),
+                    block_resources=block_flag,
+                    debug=debug_flag,
+                )
+                await scraper.start()
+                try:
+                    tn_list = [tn for _, tn in items]
+                    logging.info("[scrape-to-csv] Scraping first pass: %d items", len(tn_list))
+                    results = await scraper.get_status_many(tn_list, rps=float(args.rps))
+                    status_by_tn = {tn: (raw or "").strip() for tn, raw in results}
+
+                    missing = [tn for tn in tn_list if not status_by_tn.get(tn)]
+                    logging.info("[scrape-to-csv] Missing after pass1: %d", len(missing))
+                    if missing:
+                        results2 = await scraper.get_status_many(missing, rps=float(args.rps))
+                        for tn, raw in results2:
+                            if raw:
+                                status_by_tn[tn] = raw.strip()
+
+                    # Write CSV
+                    os.makedirs(os.path.dirname(args.out_csv) or ".", exist_ok=True)
+                    with open(args.out_csv, "w", newline="", encoding="utf-8") as f:
+                        writer = csv.writer(f)
+                        writer.writerow(["row", "tracking", "status_raw", "status_normalized"])
+                        for row_idx, tn in items:
+                            raw = status_by_tn.get(tn, "")
+                            norm = TrackerService.normalize_status(raw) if raw else ""
+                            writer.writerow([row_idx, tn, raw, norm])
+                    logging.info("[scrape-to-csv] CSV written: %s", args.out_csv)
+                finally:
+                    await scraper.close()
+
+            asyncio.run(_run())
+            print(args.out_csv)
             return 0
 
         if args.command == "compare":
