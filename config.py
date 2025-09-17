@@ -26,12 +26,21 @@ class Settings:
     DEBUG_SCRAPER: bool = _bool("DEBUG_SCRAPER", False)
     BLOCK_RESOURCES: bool = _bool("BLOCK_RESOURCES", True)
 
+    # Timing defaults (overridable via CLI flags where applicable)
+    SLOW_MO: int = int(os.getenv("SLOW_MO", "100") or 100)
+    TIMEOUT_MS: int = int(os.getenv("TIMEOUT_MS", "120000") or 120000)
+
     GOOGLE_APPLICATION_CREDENTIALS: str = os.getenv(
         "GOOGLE_APPLICATION_CREDENTIALS", "/app/recreacion_linux/credentials.json"
     )
     INTER_MAP_PATH: str = os.getenv(
         "INTER_MAP_PATH", "/app/recreacion_linux/interrapidisimo_traking_map.json"
     )
+
+    # Optional proxy settings
+    PROXY_SERVER: str | None = os.getenv("PROXY_SERVER")
+    PROXY_USERNAME: str | None = os.getenv("PROXY_USERNAME")
+    PROXY_PASSWORD: str | None = os.getenv("PROXY_PASSWORD")
 
 
 settings = Settings()

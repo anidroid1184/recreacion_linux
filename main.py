@@ -9,12 +9,12 @@ from typing import Any, Iterable
 
 from oauth2client.service_account import ServiceAccountCredentials
 from recreacion_linux.config import settings
-from services.sheets_client import SheetsClient
-from web.inter_scraper_async import AsyncInterScraper
-from logging_setup import setup_file_logging
-from services.tracker_service import TrackerService
-from comparer import compare_statuses
-from report import generate_daily_report
+from recreacion_linux.services.sheets_client import SheetsClient
+from recreacion_linux.web.inter_scraper_async import AsyncInterScraper
+from recreacion_linux.logging_setup import setup_file_logging
+from recreacion_linux.services.tracker_service import TrackerService
+from recreacion_linux.comparer import compare_statuses
+from recreacion_linux.report import generate_daily_report
 
 
 def load_credentials() -> ServiceAccountCredentials:
@@ -248,11 +248,14 @@ async def update_statuses_linux(
     scraper = AsyncInterScraper(
         headless=headless_flag,
         max_concurrency=max_concurrency,
-        slow_mo=0,
+        slow_mo=int(os.getenv("SLOW_MO", str(getattr(settings, "SLOW_MO", 100)))) ,
         retries=retries,
         timeout_ms=timeout_ms,
         block_resources=block_flag,
         debug=debug_flag,
+        proxy_server=os.getenv("PROXY_SERVER", getattr(settings, "PROXY_SERVER", None) or None),
+        proxy_username=os.getenv("PROXY_USERNAME", getattr(settings, "PROXY_USERNAME", None) or None),
+        proxy_password=os.getenv("PROXY_PASSWORD", getattr(settings, "PROXY_PASSWORD", None) or None),
     )
     await scraper.start()
     try:

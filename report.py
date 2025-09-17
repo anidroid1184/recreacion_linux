@@ -2,9 +2,9 @@ from __future__ import annotations
 import logging
 from typing import Any, List
 
-from config import settings
-from services.sheets_client import SheetsClient
-from comparer import compare_statuses
+from recreacion_linux.config import settings
+from recreacion_linux.services.sheets_client import SheetsClient
+from recreacion_linux.comparer import compare_statuses
 
 
 def generate_daily_report(

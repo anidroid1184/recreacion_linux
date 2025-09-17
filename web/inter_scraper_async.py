@@ -18,7 +18,9 @@ class AsyncInterScraper:
 
     def __init__(self, headless: bool = True, max_concurrency: int = 3, slow_mo: int = 0,
                  retries: int = 2, timeout_ms: int = 30000, block_resources: bool = True,
-                 debug: bool = False):
+                 debug: bool = False, proxy_server: str | None = None,
+                 proxy_username: str | None = None, proxy_password: str | None = None,
+                 debug_prefix: str = "debug"):
         # Public/backwards-compatible attributes
         self.headless = headless
         self.max_concurrency = max(1, int(max_concurrency))
@@ -34,21 +36,38 @@ class AsyncInterScraper:
         self._pw = None
         self.browser = None
         self._sem = asyncio.Semaphore(self.max_concurrency)
+        # Optional proxy settings
+        self._proxy_server = proxy_server
+        self._proxy_username = proxy_username
+        self._proxy_password = proxy_password
+        # Debug file prefix
+        self._debug_prefix = debug_prefix or "debug"
 
     async def start(self):
         logging.info("[PW] Starting async_playwright...")
         self._pw = await async_playwright().start()
         logging.info("[PW] Launching Chromium. headless=%s", self.headless)
-        launch_args = [
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
+        args = [
             "--disable-blink-features=AutomationControlled",
+            "--disable-dev-shm-usage",
+            "--no-sandbox",
+            "--disable-gpu",
             "--window-size=1280,800",
         ]
         if not self.headless:
-            launch_args.append("--start-maximized")
-        self.browser = await self._pw.chromium.launch(headless=self.headless, slow_mo=self.slow_mo, args=launch_args)
-        logging.info("[PW] Chromium launched. slow_mo=%s", self.slow_mo)
+            args.append("--start-maximized")
+        launch_kwargs = {
+            "headless": self.headless,
+            "slow_mo": self.slow_mo if self.headless else 0,
+            "args": args,
+        }
+        if self._proxy_server:
+            proxy: dict = {"server": self._proxy_server}
+            if self._proxy_username:
+                proxy.update({"username": self._proxy_username, "password": self._proxy_password or ""})
+            launch_kwargs["proxy"] = proxy
+        self.browser = await self._pw.chromium.launch(**launch_kwargs)
+        logging.info("[PW] Chromium launched. slow_mo=%s", self.slow_mo if self.headless else 0)
 
     async def close(self):
         with suppress(Exception):
@@ -60,6 +79,29 @@ class AsyncInterScraper:
                 logging.info("[PW] Stopping async_playwright...")
                 await self._pw.stop()
 
+    async def _maybe_accept_cookies(self, page):
+        """Attempt to accept common cookie banners (main and consent iframes)."""
+        try:
+            selectors = [
+                "button:has-text('Aceptar')",
+                "button:has-text('Aceptar todas')",
+                "#onetrust-accept-btn-handler",
+                "button[aria-label='Aceptar']",
+            ]
+            for sel in selectors:
+                try:
+                    await page.locator(sel).first.click(timeout=2000)
+                    return
+                except Exception:
+                    pass
+            # Consent frames (OneTrust/SourcePoint)
+            fl = page.frame_locator("iframe[id^='sp_message_iframe'], iframe[id*='consent'], iframe[id*='onetrust']").first
+            try:
+                await fl.locator("button:has-text('Aceptar'), #onetrust-accept-btn-handler").first.click(timeout=2000)
+            except Exception:
+                pass
+        except Exception:
+            pass
     async def _extract_status_from_page(self, page) -> str:
         # Wait basic load
         with suppress(PlaywrightTimeoutError):
@@ -176,28 +218,48 @@ class AsyncInterScraper:
         popup = None
         try:
             # New context per guide
-            ua = (
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/122.0.0.0 Safari/537.36"
-            )
+            ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+            extra_headers = {
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "Accept-Language": "es-CO,es;q=0.9,en;q=0.8",
+                "Upgrade-Insecure-Requests": "1",
+                "sec-ch-ua": '"Google Chrome";v="122", "Chromium";v="122", "Not(A:Brand";v="24"',
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"Windows"',
+            }
             ctx_opts = {
                 "user_agent": ua,
-                "locale": "es-ES",
+                "locale": "es-CO",
                 "timezone_id": "America/Bogota",
-                "extra_http_headers": {"Accept-Language": "es-ES,es;q=0.9,en;q=0.8"},
+                "viewport": {"width": 1280, "height": 800} if self.headless else None,
+                "java_script_enabled": True,
+                "bypass_csp": True,
+                "extra_http_headers": extra_headers,
             }
-            if self.headless:
-                logging.debug("[PW] Creating new context (headless) for %s", tracking_number)
-                ctx_opts["viewport"] = {"width": 1280, "height": 800}
-            else:
-                logging.debug("[PW] Creating new context (headed) for %s", tracking_number)
-                ctx_opts["viewport"] = None
             context = await self.browser.new_context(**ctx_opts)
 
-            # Hide webdriver property to reduce bot detection
+            # Stealth init scripts
             with suppress(Exception):
                 await context.add_init_script(
-                    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+                    """
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+window.chrome = { runtime: {} };
+Object.defineProperty(navigator, 'languages', { get: () => ['es-CO','es','en'] });
+Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3] });
+const getParameter = WebGLRenderingContext.prototype.getParameter;
+WebGLRenderingContext.prototype.getParameter = function(param){
+  if (param === 37445) return 'Intel Inc.';
+  if (param === 37446) return 'Intel Iris OpenGL';
+  return getParameter.call(this, param);
+};
+const originalQuery = navigator.permissions.query;
+navigator.permissions.query = (parameters) => (
+  parameters && parameters.name === 'notifications'
+    ? Promise.resolve({ state: 'denied' })
+    : originalQuery(parameters)
+);
+                    """
                 )
 
             # Debug hooks: capture console and network events when enabled
@@ -242,11 +304,11 @@ class AsyncInterScraper:
                 except Exception:
                     pass
 
-            # Block heavy resources to speed up
+            # Block heavy resources to speed up (keep CSS/JS/XHR)
             if self.block_resources:
                 async def _route_handler(route):
                     try:
-                        if route.request.resource_type in {"image", "media", "font", "stylesheet"}:
+                        if route.request.resource_type in {"image", "media", "font"}:
                             await route.abort()
                         else:
                             await route.continue_()
@@ -279,11 +341,9 @@ class AsyncInterScraper:
             with suppress(Exception):
                 logging.debug("[PW] [%s] Landed URL: %s", tracking_number, page.url)
 
-            # Try to accept cookie banners quickly
+            # Try to accept cookie banners (main or common consent iframes)
             with suppress(Exception):
-                btn = page.get_by_role("button", name=lambda n: n and ("acept" in n.lower() or "de acuerdo" in n.lower() or "entendido" in n.lower()))
-                await btn.click(timeout=2000)
-                logging.debug("[PW] [%s] Cookie banner clicked", tracking_number)
+                await self._maybe_accept_cookies(page)
 
             # Find the visible input (desktop/mobile)
             input_css = "#inputGuide:visible, #inputGuideMovil:visible, input.buscarGuiaInput:visible"
@@ -372,7 +432,7 @@ class AsyncInterScraper:
                         ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
                         logs_dir = os.path.join(os.getcwd(), "logs")
                         os.makedirs(logs_dir, exist_ok=True)
-                        base = os.path.join(logs_dir, f"debug_{tracking_number}_{ts}_iframe")
+                        base = os.path.join(logs_dir, f"{self._debug_prefix}_{tracking_number}_{ts}_iframe")
                         html = await iframe.content()
                         with open(base + ".html", "w", encoding="utf-8") as f:
                             f.write(html)
@@ -384,7 +444,7 @@ class AsyncInterScraper:
                         ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
                         logs_dir = os.path.join(os.getcwd(), "logs")
                         os.makedirs(logs_dir, exist_ok=True)
-                        base = os.path.join(logs_dir, f"debug_{tracking_number}_{ts}")
+                        base = os.path.join(logs_dir, f"{self._debug_prefix}_{tracking_number}_{ts}")
                         with open(base + "_console.ndjson", "w", encoding="utf-8") as f:
                             for ev in console_events:
                                 f.write(json.dumps(ev, ensure_ascii=False) + "\n")
@@ -464,7 +524,7 @@ class AsyncInterScraper:
             ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
             logs_dir = os.path.join(os.getcwd(), "logs")
             os.makedirs(logs_dir, exist_ok=True)
-            base = os.path.join(logs_dir, f"debug_{tracking_number}_{ts}_{reason}")
+            base = os.path.join(logs_dir, f"{self._debug_prefix}_{tracking_number}_{ts}_{reason}")
             # HTML
             html_path = base + ".html"
             content = await page.content()
