@@ -25,6 +25,7 @@ class AsyncInterScraper:
         self.retries = max(0, int(retries))
         self._retries = self.retries  # maintain compatibility with existing references
         self.timeout = int(timeout_ms)
+        self._timeout = self.timeout  # maintain compatibility with existing references
         self.block_resources = block_resources
         self.debug = debug
         self._pw = None

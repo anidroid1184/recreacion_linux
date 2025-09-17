@@ -447,7 +447,7 @@ def main() -> int:
                 end_row=args.end_row,
             )
             logging.info("Mark-compare finished. Rows written: %d", written)
-            return 0
+                return 0
 
         if args.command == "all":
             asyncio.run(update_statuses_linux(
