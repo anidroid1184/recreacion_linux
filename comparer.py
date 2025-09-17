@@ -3,8 +3,8 @@ import logging
 from datetime import datetime
 from typing import Any, List, Tuple
 
-from recreacion_linux.services.sheets_client import SheetsClient
-from recreacion_linux.services.tracker_service import TrackerService
+from services.sheets_client import SheetsClient
+from services.tracker_service import TrackerService
 
 
 def compare_statuses(

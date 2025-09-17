@@ -4,23 +4,17 @@ import asyncio
 import csv
 import logging
 import os
-import sys
 from contextlib import suppress
 from typing import Any, Iterable
 
-# Ensure project root is on sys.path when running from recreacion_linux/
-PROJECT_ROOT = os.path.dirname(os.path.dirname(__file__))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
-
 from oauth2client.service_account import ServiceAccountCredentials
 from recreacion_linux.config import settings
-from recreacion_linux.services.sheets_client import SheetsClient
-from recreacion_linux.web.inter_scraper_async import AsyncInterScraper
-from recreacion_linux.logging_setup import setup_file_logging
-from recreacion_linux.services.tracker_service import TrackerService
-from recreacion_linux.comparer import compare_statuses
-from recreacion_linux.report import generate_daily_report
+from services.sheets_client import SheetsClient
+from web.inter_scraper_async import AsyncInterScraper
+from logging_setup import setup_file_logging
+from services.tracker_service import TrackerService
+from comparer import compare_statuses
+from report import generate_daily_report
 
 
 def load_credentials() -> ServiceAccountCredentials:
@@ -42,9 +36,9 @@ def load_credentials() -> ServiceAccountCredentials:
     pkg_dir = os.path.dirname(__file__)
     cwd = os.getcwd()
     candidates = [
-        os.path.join(pkg_dir, "credentials.json"),          # running from recreacion_linux/
-        os.path.join(PROJECT_ROOT, "credentials.json"),     # parent project root
+        os.path.join(pkg_dir, "credentials.json"),          # next to main.py
         os.path.join(cwd, "credentials.json"),              # current working directory
+        os.path.join(cwd, "recreacion_linux", "credentials.json"),  # inside subfolder if invoked from above
     ]
     for path in candidates:
         if os.path.isfile(path):
