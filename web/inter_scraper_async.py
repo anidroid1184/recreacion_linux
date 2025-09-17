@@ -19,8 +19,11 @@ class AsyncInterScraper:
     def __init__(self, headless: bool = True, max_concurrency: int = 3, slow_mo: int = 0,
                  retries: int = 2, timeout_ms: int = 30000, block_resources: bool = True,
                  debug: bool = False):
+        # Public/backwards-compatible attributes
         self.headless = headless
         self.max_concurrency = max(1, int(max_concurrency))
+        # When headed, enforce at least 100ms to reduce race conditions with UI animations
+        # When headless, allow caller-provided slow_mo (e.g., 50–150) as anti-bot softening
         self.slow_mo = slow_mo if headless else max(slow_mo, 100)
         self.retries = max(0, int(retries))
         self._retries = self.retries  # maintain compatibility with existing references
@@ -67,7 +70,10 @@ class AsyncInterScraper:
             title = page.locator("css=div.content p.title-current-state").first
             logging.debug("[PW] Waiting title-current-state visible")
             await title.wait_for(state="visible", timeout=self.timeout)
-            value = title.locator("xpath=following-sibling::p[contains(@class,'font-weight-600')][1]")
+            # Prefer CSS sibling combinator first, then XPath fallback
+            value = title.locator("css=~ p.font-weight-600").first
+            if not await value.is_visible(timeout=1000):
+                value = title.locator("xpath=following-sibling::p[contains(@class,'font-weight-600')][1]")
             logging.debug("[PW] Waiting value (font-weight-600) visible")
             await value.wait_for(state="visible", timeout=self.timeout)
             txt = (await value.inner_text()).strip()
@@ -83,7 +89,9 @@ class AsyncInterScraper:
             )
             logging.debug("[PW] Waiting alternative title text visible")
             await title_by_text.wait_for(state="visible", timeout=min(6000, self.timeout))
-            value = title_by_text.locator("xpath=following::p[contains(@class,'font-weight-600')][1]")
+            value = title_by_text.locator("css=~ p.font-weight-600").first
+            if not await value.is_visible(timeout=1000):
+                value = title_by_text.locator("xpath=following::p[contains(@class,'font-weight-600')][1]")
             logging.debug("[PW] Waiting value (alt) visible")
             await value.wait_for(state="visible", timeout=min(6000, self.timeout))
             txt = (await value.inner_text()).strip()
@@ -113,6 +121,7 @@ class AsyncInterScraper:
     async def _extract_status_from_frame(self, frame) -> str:
         """Try to extract status text from an iframe frame.
         Attempts similar heuristics as page extraction but scoped to the frame.
+        Prioritizes: title-current-state ~ p.font-weight-600, then p.font-weight-600, then p.guide-WhitOut-Novelty.
         """
         from playwright.async_api import TimeoutError as PlaywrightTimeoutError
         with suppress(PlaywrightTimeoutError):
@@ -121,7 +130,9 @@ class AsyncInterScraper:
         try:
             title = frame.locator("css=div.content p.title-current-state").first
             await title.wait_for(state="visible", timeout=min(6000, self._timeout))
-            value = title.locator("xpath=following-sibling::p[contains(@class,'font-weight-600')][1]")
+            value = title.locator("css=~ p.font-weight-600").first
+            if not await value.is_visible(timeout=1000):
+                value = title.locator("xpath=following-sibling::p[contains(@class,'font-weight-600')][1]")
             await value.wait_for(state="visible", timeout=min(6000, self._timeout))
             txt = (await value.inner_text()).strip()
             if txt:
@@ -134,7 +145,9 @@ class AsyncInterScraper:
                 "xpath=(//*[self::p or self::h1 or self::h2 or self::div][contains(normalize-space(.), 'Estado actual')])[1]"
             )
             await title_by_text.wait_for(state="visible", timeout=min(6000, self._timeout))
-            value = title_by_text.locator("xpath=following::p[contains(@class,'font-weight-600')][1]")
+            value = title_by_text.locator("css=~ p.font-weight-600").first
+            if not await value.is_visible(timeout=1000):
+                value = title_by_text.locator("xpath=following::p[contains(@class,'font-weight-600')][1]")
             await value.wait_for(state="visible", timeout=min(6000, self._timeout))
             txt = (await value.inner_text()).strip()
             if txt:
@@ -148,6 +161,13 @@ class AsyncInterScraper:
             txt = (await el.inner_text()).strip()
             if txt:
                 return txt
+        # Novelty pill
+        with suppress(Exception):
+            novelty = frame.locator("css=p.guide-WhitOut-Novelty").first
+            await novelty.wait_for(state="visible", timeout=min(3000, self._timeout))
+            txt3 = (await novelty.inner_text()).strip()
+            if txt3:
+                return txt3
         return ""
 
     async def get_status(self, tracking_number: str) -> str:
@@ -179,6 +199,48 @@ class AsyncInterScraper:
                 await context.add_init_script(
                     "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
                 )
+
+            # Debug hooks: capture console and network events when enabled
+            console_events: list[dict] = []
+            network_events: list[dict] = []
+            if self.debug:
+                try:
+                    from datetime import datetime
+                    def _ts():
+                        return datetime.utcnow().isoformat() + "Z"
+
+                    def _on_console(msg):
+                        try:
+                            console_events.append({
+                                "t": _ts(),
+                                "type": msg.type,
+                                "text": msg.text,
+                                "page": getattr(msg.page, 'url', lambda: None)() if getattr(msg, 'page', None) else None,
+                            })
+                        except Exception:
+                            pass
+
+                    async def _on_request_finished(req):
+                        try:
+                            rtype = req.resource_type
+                            if rtype in {"xhr", "fetch"}:
+                                status = None
+                                with suppress(Exception):
+                                    resp = await req.response()
+                                    status = resp.status if resp else None
+                                network_events.append({
+                                    "t": _ts(),
+                                    "url": req.url,
+                                    "status": status,
+                                    "rtype": rtype,
+                                })
+                        except Exception:
+                            pass
+
+                    context.on("console", _on_console)
+                    context.on("requestfinished", lambda req: asyncio.create_task(_on_request_finished(req)))
+                except Exception:
+                    pass
 
             # Block heavy resources to speed up
             if self.block_resources:
@@ -260,33 +322,43 @@ class AsyncInterScraper:
 
             # After triggering, either a popup opens or an iframe is injected in the same page
             target = popup if popup is not None else page
-            # Try to detect iframe with results
-            iframe = None
+
+            # Preferred wait: iframe LOCATOR with content already mounted, then inner status locator
+            result = ""
             try:
-                # Prefer class name, fallback to src patterns
-                iframe_loc = page.locator("iframe.iframe-sigue-tu-envio").first
-                await iframe_loc.wait_for(state="attached", timeout=8000)
-                iframe = await iframe_loc.content_frame()
+                iframe_fl = target.frame_locator(
+                    "iframe.iframe-sigue-tu-envio, iframe[src*='SiguetuEnvio'], iframe[src*='Shipment']"
+                ).first
+                status_inside = iframe_fl.locator(
+                    "css=div.content p.title-current-state ~ p.font-weight-600, "
+                    "p.font-weight-600, p.guide-WhitOut-Novelty"
+                ).first
+                logging.debug("[PW] [%s] Waiting status inside iframe (preferred)", tracking_number)
+                await status_inside.wait_for(state="visible", timeout=self._timeout)
+                txt = (await status_inside.inner_text()).strip()
+                if txt:
+                    result = txt
             except Exception:
-                # Fallback by src substring
-                try:
-                    iframe_loc = page.frame_locator("iframe[src*='SiguetuEnvio'], iframe[src*='Shipment']").first
-                    # frame_locator returns a locator for elements inside; need element handle to get frame
-                    el = await target.locator("iframe[src*='SiguetuEnvio'], iframe[src*='Shipment']").first.element_handle(timeout=5000)
+                result = ""
+
+            # Fallbacks: try classic frame handle extraction or on-page extraction
+            if not result:
+                iframe = None
+                with suppress(Exception):
+                    # First try by class
+                    el = await target.locator("iframe.iframe-sigue-tu-envio").first.element_handle(timeout=4000)
                     if el:
                         iframe = await el.content_frame()
-                except Exception:
-                    iframe = None
-
-            # Extract status either from popup/page or from iframe when present
-            logging.debug("[PW] [%s] Extracting status from %s", tracking_number, "iframe" if iframe else ("popup" if popup else "page"))
-            if iframe is not None:
-                try:
-                    result = await self._extract_status_from_frame(iframe)
-                except Exception:
-                    result = ""
-            else:
-                result = await self._extract_status_from_page(target)
+                if iframe is None:
+                    with suppress(Exception):
+                        el = await target.locator("iframe[src*='SiguetuEnvio'], iframe[src*='Shipment']").first.element_handle(timeout=4000)
+                        if el:
+                            iframe = await el.content_frame()
+                if iframe is not None:
+                    with suppress(Exception):
+                        result = await self._extract_status_from_frame(iframe)
+                if not result:
+                    result = await self._extract_status_from_page(target)
             logging.info("[PW] [%-14s] Status: %s", tracking_number, result or "<empty>")
             if not result:
                 # Capture page state if extraction yielded empty
@@ -304,6 +376,21 @@ class AsyncInterScraper:
                         html = await iframe.content()
                         with open(base + ".html", "w", encoding="utf-8") as f:
                             f.write(html)
+                # Dump console/network journals when debug enabled
+                if self.debug:
+                    with suppress(Exception):
+                        from datetime import datetime
+                        import json, os
+                        ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+                        logs_dir = os.path.join(os.getcwd(), "logs")
+                        os.makedirs(logs_dir, exist_ok=True)
+                        base = os.path.join(logs_dir, f"debug_{tracking_number}_{ts}")
+                        with open(base + "_console.ndjson", "w", encoding="utf-8") as f:
+                            for ev in console_events:
+                                f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+                        with open(base + "_network.ndjson", "w", encoding="utf-8") as f:
+                            for ev in network_events:
+                                f.write(json.dumps(ev, ensure_ascii=False) + "\n")
             return result
         except Exception as e:
             logging.error("[PW] Error for %s: %s", tracking_number, e)

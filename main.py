@@ -365,7 +365,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_scrape_csv.add_argument("--max-concurrency", type=int, default=1)
     p_scrape_csv.add_argument("--rps", type=float, default=0.6)
     p_scrape_csv.add_argument("--retries", type=int, default=2)
-    p_scrape_csv.add_argument("--timeout-ms", dest="timeout_ms", type=int, default=60000)
+    # Increase timeout for slower iframe mounting (anti-bot, network)
+    p_scrape_csv.add_argument("--timeout-ms", dest="timeout_ms", type=int, default=120000)
+    # Soft anti-bot pacing even in headless mode
+    p_scrape_csv.add_argument("--slow-mo", dest="slow_mo", type=int, default=100)
 
     # compare
     p_compare = sub.add_parser("compare", help="Compare DROPi vs WEB statuses and print count; results used by report")
@@ -480,7 +483,7 @@ def main() -> int:
                 scraper = AsyncInterScraper(
                     headless=headless_flag,
                     max_concurrency=int(args.max_concurrency),
-                    slow_mo=0,
+                    slow_mo=int(args.slow_mo),
                     retries=int(args.retries),
                     timeout_ms=int(args.timeout_ms),
                     block_resources=block_flag,
