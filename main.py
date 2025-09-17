@@ -106,6 +106,76 @@ def _flush_batch(sheets: SheetsClient, batch_updates: list[tuple[int, list[Any]]
             sheets.values_batch_update(chunk)
 
 
+def mark_compare_column(
+    sheets: SheetsClient,
+    start_row: int = 2,
+    end_row: int | None = None,
+) -> int:
+    """Write per-row comparison into existing columns E and F.
+
+    - Column E: header 'COINCIDEN' (boolean as string 'TRUE'/'FALSE')
+      TRUE if normalized DROPi == normalized TRACKING and both non-empty; FALSE otherwise.
+    - Column F: header 'ALERTA' computed via TrackerService.compute_alert(dropi_norm, web_norm)
+
+    Does not add or rename headers; it writes to the columns already present.
+    Returns number of rows written.
+    """
+    records = sheets.read_main_records_resilient()
+    headers = sheets.read_headers()
+
+    # Resolve required base columns by name
+    try:
+        web_col_name = "STATUS TRACKING"
+        dropi_col_name = "STATUS DROPI"
+        dropi_col = headers.index(dropi_col_name) + 1
+        web_col = headers.index(web_col_name) + 1
+    except ValueError:
+        logging.error("Mark-compare: required headers not found (STATUS DROPI / STATUS TRACKING)")
+        return 0
+
+    # Resolve destination columns: prefer exact headers, fallback to fixed E(5), F(6)
+    def _find_col(candidates: list[str], fallback_index: int) -> int:
+        for name in candidates:
+            if name in headers:
+                return headers.index(name) + 1
+        return fallback_index
+
+    coincide_col = _find_col(["COINCIDEN", "COINCIDE", "Coinciden", "Coincide"], 5)  # E
+    alerta_col = _find_col(["ALERTA", "Alerta"], 6)  # F
+
+    updates: list[tuple[int, list[Any]]] = []
+
+    for idx, rec in enumerate(records, start=2):
+        if idx < start_row:
+            continue
+        if end_row is not None and idx > end_row:
+            break
+
+        dropi_raw = str(rec.get("STATUS DROPI", "")).strip()
+        web_raw = str(rec.get("STATUS TRACKING", "")).strip()
+
+        dropi_norm = TrackerService.normalize_status(dropi_raw) if dropi_raw else ""
+        web_norm = TrackerService.normalize_status(web_raw) if web_raw else ""
+
+        coincide_val = "TRUE" if (dropi_norm and web_norm and dropi_norm == web_norm) else "FALSE"
+        alerta_val = TrackerService.compute_alert(dropi_norm or "", web_norm or "")
+
+        # Build row updates up to the furthest of E/F
+        max_col = max(coincide_col, alerta_col)
+        row_updates = [None] * max_col
+        row_updates[coincide_col - 1] = coincide_val
+        row_updates[alerta_col - 1] = alerta_val
+        updates.append((idx, row_updates))
+
+    if not updates:
+        logging.info("Mark-compare: no rows to update")
+        return 0
+
+    _flush_batch(sheets, updates)
+    logging.info("Mark-compare written rows: %d (cols E/F)", len(updates))
+    return len(updates)
+
+
 async def update_statuses_linux(
     sheets: SheetsClient,
     headless: bool = True,
@@ -299,6 +369,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_report.add_argument("--only-mismatches", type=str2bool, default=True)
     p_report.add_argument("--prefix", type=str, default=None)
 
+    # mark-compare (write TRUE/FALSE in 'COINCIDE' for all rows)
+    p_mark = sub.add_parser("mark-compare", help="Write per-row boolean 'COINCIDE' across all rows")
+    p_mark.add_argument("--start-row", type=int, default=2)
+    p_mark.add_argument("--end-row", type=int, default=None)
+
     # all
     p_all = sub.add_parser("all", help="Run scrape then report")
     p_all.add_argument("--start-row", type=int, default=2)
@@ -363,6 +438,15 @@ def main() -> int:
                 prefix=getattr(args, "prefix", None),
             )
             logging.info("Report finished. Sheet: %s", name)
+            return 0
+
+        if args.command == "mark-compare":
+            written = mark_compare_column(
+                sheets,
+                start_row=args.start_row,
+                end_row=args.end_row,
+            )
+            logging.info("Mark-compare finished. Rows written: %d", written)
             return 0
 
         if args.command == "all":

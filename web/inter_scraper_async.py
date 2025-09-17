@@ -35,7 +35,12 @@ class AsyncInterScraper:
         logging.info("[PW] Starting async_playwright...")
         self._pw = await async_playwright().start()
         logging.info("[PW] Launching Chromium. headless=%s", self.headless)
-        launch_args = ["--no-sandbox", "--disable-dev-shm-usage"]
+        launch_args = [
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-blink-features=AutomationControlled",
+            "--window-size=1280,800",
+        ]
         if not self.headless:
             launch_args.append("--start-maximized")
         self.browser = await self._pw.chromium.launch(headless=self.headless, slow_mo=self.slow_mo, args=launch_args)
@@ -110,12 +115,29 @@ class AsyncInterScraper:
         popup = None
         try:
             # New context per guide
+            ua = (
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/122.0.0.0 Safari/537.36"
+            )
+            ctx_opts = {
+                "user_agent": ua,
+                "locale": "es-ES",
+                "timezone_id": "America/Bogota",
+                "extra_http_headers": {"Accept-Language": "es-ES,es;q=0.9,en;q=0.8"},
+            }
             if self.headless:
                 logging.debug("[PW] Creating new context (headless) for %s", tracking_number)
-                context = await self.browser.new_context(viewport={"width": 1280, "height": 800})
+                ctx_opts["viewport"] = {"width": 1280, "height": 800}
             else:
                 logging.debug("[PW] Creating new context (headed) for %s", tracking_number)
-                context = await self.browser.new_context(viewport=None)
+                ctx_opts["viewport"] = None
+            context = await self.browser.new_context(**ctx_opts)
+
+            # Hide webdriver property to reduce bot detection
+            with suppress(Exception):
+                await context.add_init_script(
+                    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+                )
 
             # Block heavy resources to speed up
             if self.block_resources:

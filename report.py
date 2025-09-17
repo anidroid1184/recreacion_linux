@@ -18,8 +18,12 @@ def generate_daily_report(
 
     Returns the worksheet name used.
     """
+    # Always report only mismatches by design
     diffs: List[List[Any]] = compare_statuses(
-        sheets, start_row=start_row, end_row=end_row, only_mismatches=only_mismatches
+        sheets,
+        start_row=start_row,
+        end_row=end_row,
+        only_mismatches=True,
     )
     if not diffs:
         logging.info("Report: no rows to write (no differences found)")
