@@ -1,0 +1,28 @@
+# docker-compose.yml (scoped to recreacion_linux/)
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: recreacion_linux/Dockerfile
+    image: dropi-inter:latest
+    working_dir: /app
+    user: "pwuser"
+    # Compose reads .env on the host (same dir as this file) and injects variables
+    env_file:
+      - .env
+    environment:
+      # Defaults in case they are missing in .env
+      GOOGLE_APPLICATION_CREDENTIALS: /app/recreacion_linux/credentials.json
+      INTER_MAP_PATH: /app/recreacion_linux/interrapidisimo_traking_map.json
+      HEADLESS: "true"
+      DEBUG_SCRAPER: "false"
+      BLOCK_RESOURCES: "true"
+      PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS: "1"
+      TZ: America/Bogota
+    # Mount only what is needed (avoid bind-mounting whole repo in prod)
+    volumes:
+      - ./out:/app/recreacion_linux/out
+      - ./logs:/app/recreacion_linux/logs
+      - ./credentials.json:/app/recreacion_linux/credentials.json:ro
+      - ./interrapidisimo_traking_map.json:/app/recreacion_linux/interrapidisimo_traking_map.json:ro
+    command: ["bash","-lc","python -V && echo Ready"]
