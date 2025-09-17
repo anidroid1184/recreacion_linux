@@ -110,6 +110,46 @@ class AsyncInterScraper:
                 return txt3
         return ""
 
+    async def _extract_status_from_frame(self, frame) -> str:
+        """Try to extract status text from an iframe frame.
+        Attempts similar heuristics as page extraction but scoped to the frame.
+        """
+        from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+        with suppress(PlaywrightTimeoutError):
+            await frame.wait_for_load_state("domcontentloaded", timeout=min(8000, self._timeout))
+        # Primary: same pattern as page
+        try:
+            title = frame.locator("css=div.content p.title-current-state").first
+            await title.wait_for(state="visible", timeout=min(6000, self._timeout))
+            value = title.locator("xpath=following-sibling::p[contains(@class,'font-weight-600')][1]")
+            await value.wait_for(state="visible", timeout=min(6000, self._timeout))
+            txt = (await value.inner_text()).strip()
+            if txt:
+                return txt
+        except PlaywrightTimeoutError:
+            pass
+        # Alt by text
+        try:
+            title_by_text = frame.locator(
+                "xpath=(//*[self::p or self::h1 or self::h2 or self::div][contains(normalize-space(.), 'Estado actual')])[1]"
+            )
+            await title_by_text.wait_for(state="visible", timeout=min(6000, self._timeout))
+            value = title_by_text.locator("xpath=following::p[contains(@class,'font-weight-600')][1]")
+            await value.wait_for(state="visible", timeout=min(6000, self._timeout))
+            txt = (await value.inner_text()).strip()
+            if txt:
+                return txt
+        except PlaywrightTimeoutError:
+            pass
+        # Generic strong/bold text in the card
+        with suppress(Exception):
+            el = frame.locator("css=p.font-weight-600, strong, b").first
+            await el.wait_for(state="visible", timeout=min(5000, self._timeout))
+            txt = (await el.inner_text()).strip()
+            if txt:
+                return txt
+        return ""
+
     async def get_status(self, tracking_number: str) -> str:
         context = None
         page = None
@@ -194,28 +234,76 @@ class AsyncInterScraper:
             await loc.fill(tracking_number)
             logging.debug("[PW] [%s] Tracking typed", tracking_number)
 
-            # Follow new page created by Enter
+            # Trigger search: press Enter and also try clicking known buttons (site updated behavior)
+            popup = None
+            triggered = False
             try:
                 logging.debug("[PW] [%s] Expecting popup on Enter", tracking_number)
-                async with context.expect_page(timeout=self._timeout) as new_page_info:
+                async with context.expect_page(timeout=2000) as new_page_info:
                     await loc.press("Enter")
                 popup = await new_page_info.value
                 with suppress(Exception):
                     await popup.bring_to_front()
-                logging.debug("[PW] [%s] Popup opened", tracking_number)
+                triggered = True
+                logging.debug("[PW] [%s] Popup opened (Enter)", tracking_number)
             except PlaywrightTimeoutError:
                 popup = None
-                with suppress(PlaywrightTimeoutError):
-                    await page.wait_for_load_state("domcontentloaded", timeout=self._timeout)
+            # If no popup, try clicking visible buttons by id/class used on site
+            if not triggered:
+                buttons_sel = "#BtnGuide:visible, #BtnR:visible, #BtnMovilGuide:visible, #BtnRMovil:visible, #buscarGuia:visible, button.buscarGuia:visible"
+                btn = page.locator(buttons_sel).first
+                with suppress(Exception):
+                    await btn.wait_for(state="visible", timeout=3000)
+                    await btn.scroll_into_view_if_needed()
+                    await btn.click()
+                    triggered = True
 
+            # After triggering, either a popup opens or an iframe is injected in the same page
             target = popup if popup is not None else page
-            logging.debug("[PW] [%s] Extracting status from %s", tracking_number, "popup" if popup else "page")
-            result = await self._extract_status_from_page(target)
+            # Try to detect iframe with results
+            iframe = None
+            try:
+                # Prefer class name, fallback to src patterns
+                iframe_loc = page.locator("iframe.iframe-sigue-tu-envio").first
+                await iframe_loc.wait_for(state="attached", timeout=8000)
+                iframe = await iframe_loc.content_frame()
+            except Exception:
+                # Fallback by src substring
+                try:
+                    iframe_loc = page.frame_locator("iframe[src*='SiguetuEnvio'], iframe[src*='Shipment']").first
+                    # frame_locator returns a locator for elements inside; need element handle to get frame
+                    el = await target.locator("iframe[src*='SiguetuEnvio'], iframe[src*='Shipment']").first.element_handle(timeout=5000)
+                    if el:
+                        iframe = await el.content_frame()
+                except Exception:
+                    iframe = None
+
+            # Extract status either from popup/page or from iframe when present
+            logging.debug("[PW] [%s] Extracting status from %s", tracking_number, "iframe" if iframe else ("popup" if popup else "page"))
+            if iframe is not None:
+                try:
+                    result = await self._extract_status_from_frame(iframe)
+                except Exception:
+                    result = ""
+            else:
+                result = await self._extract_status_from_page(target)
             logging.info("[PW] [%-14s] Status: %s", tracking_number, result or "<empty>")
             if not result:
                 # Capture page state if extraction yielded empty
                 with suppress(Exception):
                     await self._dump_debug(target, tracking_number, reason="empty")
+                with suppress(Exception):
+                    if iframe is not None:
+                        # Dump iframe HTML too for diagnosis
+                        from datetime import datetime
+                        import os
+                        ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+                        logs_dir = os.path.join(os.getcwd(), "logs")
+                        os.makedirs(logs_dir, exist_ok=True)
+                        base = os.path.join(logs_dir, f"debug_{tracking_number}_{ts}_iframe")
+                        html = await iframe.content()
+                        with open(base + ".html", "w", encoding="utf-8") as f:
+                            f.write(html)
             return result
         except Exception as e:
             logging.error("[PW] Error for %s: %s", tracking_number, e)
