@@ -1,27 +1,40 @@
-from dataclasses import dataclass
 import os
+from dataclasses import dataclass
 from dotenv import load_dotenv
 
-# Load environment variables from .env at project root
-BASE_DIR = os.path.dirname(os.path.dirname(__file__))
-load_dotenv(os.path.join(BASE_DIR, ".env"))
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DOTENV_PATH = os.path.join("/app", ".env")
+
+# Load .env only if it exists and is readable (avoid PermissionError when host mounts restricted)
+if os.path.isfile(DOTENV_PATH) and os.access(DOTENV_PATH, os.R_OK):
+    load_dotenv(DOTENV_PATH)
 
 
-@dataclass(frozen=True)
+def _bool(name: str, default: bool) -> bool:
+    v = os.getenv(name)
+    if v is None:
+        return default
+    return v.strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+@dataclass
 class Settings:
-    """Centralized runtime configuration for the Linux runner.
+    HEADLESS: bool = _bool("HEADLESS", True)
+    DEBUG_SCRAPER: bool = _bool("DEBUG_SCRAPER", False)
+    BLOCK_RESOURCES: bool = _bool("BLOCK_RESOURCES", True)
 
-    Do not store secrets here. Only IDs, names and flags. Credentials are read
-    from credentials.json managed outside of git.
-    """
-    drive_folder_id: str = os.getenv("DRIVE_FOLDER_ID", "")
-    spreadsheet_name: str = os.getenv("SPREADSHEET_NAME", "seguimiento")
-    headless: bool = os.getenv("HEADLESS", "true").lower() == "true"
-    timezone: str = os.getenv("TZ", "America/Bogota")
-    daily_report_prefix: str = os.getenv("DAILY_REPORT_PREFIX", "Informe_")
-    individual_report_folder_id: str = (
-        os.getenv("DRIVE_FOLER_INDIVIDUAL_FILE")
-        or os.getenv("DRIVE_FOLDER_INDIVIDUAL_FILE", "")
+    # Optional IDs/names
+    DRIVE_FOLDER_ID: str = os.getenv("DRIVE_FOLDER_ID", "")
+    SPREADSHEET_NAME: str = os.getenv("SPREADSHEET_NAME", "seguimiento")
+    TZ: str = os.getenv("TZ", "America/Bogota")
+    DAILY_REPORT_PREFIX: str = os.getenv("DAILY_REPORT_PREFIX", "Informe_")
+
+    # Credentials and mapping file paths (defaults inside container)
+    GOOGLE_APPLICATION_CREDENTIALS: str = os.getenv(
+        "GOOGLE_APPLICATION_CREDENTIALS", "/app/recreacion_linux/credentials.json"
+    )
+    INTER_MAP_PATH: str = os.getenv(
+        "INTER_MAP_PATH", "/app/recreacion_linux/interrapidisimo_traking_map.json"
     )
 
 
