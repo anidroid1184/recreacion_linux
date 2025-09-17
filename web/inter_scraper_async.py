@@ -157,8 +157,23 @@ class AsyncInterScraper:
             logging.info("[PW] [%-14s] New page", tracking_number)
             page = await context.new_page()
             logging.debug("[PW] [%s] Navigating to tracking page", tracking_number)
-            await page.goto("https://interrapidisimo.com/sigue-tu-envio/", timeout=max(45000, self.timeout), wait_until="domcontentloaded")
-            await page.goto("https://interrapidisimo.com/sigue-tu-envio/", timeout=max(45000, self.timeout), wait_until="domcontentloaded")
+            url = "https://interrapidisimo.com/sigue-tu-envio/"
+            # Robust navigation with small retries to mitigate net::ERR_ABORTED/anti-bot redirects
+            nav_ok = False
+            for attempt_nav in range(3):
+                try:
+                    await page.goto(url, timeout=max(45000, self._timeout), wait_until="domcontentloaded")
+                    nav_ok = True
+                    break
+                except Exception as nav_err:
+                    logging.warning("[PW] [%s] nav attempt %d failed: %s", tracking_number, attempt_nav + 1, nav_err)
+                    if attempt_nav < 2:
+                        await asyncio.sleep(1.5 * (attempt_nav + 1))
+                        continue
+                    else:
+                        raise
+            if not nav_ok:
+                raise RuntimeError("navigation_failed")
 
             # Try to accept cookie banners quickly
             with suppress(Exception):
@@ -198,6 +213,11 @@ class AsyncInterScraper:
             return result
         except Exception as e:
             logging.error("[PW] Error for %s: %s", tracking_number, e)
+            # Dump debug artifacts if possible
+            with suppress(Exception):
+                target = popup if popup is not None else (page if page is not None else None)
+                if target is not None:
+                    await self._dump_debug(target, tracking_number, reason="exception")
             return ""
         finally:
             with suppress(Exception):
@@ -233,13 +253,13 @@ class AsyncInterScraper:
                     results.append((tn, ""))
                     logging.info("[PW] [%-14s] Empty after retries", tn)
         tasks = []
+        # Snapshot first to avoid consuming generators twice
+        tn_list = list(tracking_numbers)
         if rps and rps > 0:
             interval = 1.0 / float(rps)
             start = asyncio.get_event_loop().time()
-            logging.info("[PW] Scheduling %d tasks with RPS=%.2f (interval=%.3fs)", len(list(tracking_numbers)), rps, interval)
-            # Need a snapshot since tracking_numbers may be a generator
-            tn_list = list(tracking_numbers)
-            for i, tn in enumerate(tracking_numbers):
+            logging.info("[PW] Scheduling %d tasks with RPS=%.2f (interval=%.3fs)", len(tn_list), rps, interval)
+            for i, tn in enumerate(tn_list):
                 # Stagger task starts to respect RPS
                 async def delayed_launch(tn=tn, i=i):
                     target_time = start + i * interval
@@ -249,7 +269,6 @@ class AsyncInterScraper:
                     await worker(tn)
                 tasks.append(asyncio.create_task(delayed_launch()))
         else:
-            tn_list = list(tracking_numbers)
             logging.info("[PW] Launching %d tasks immediately (no RPS throttling)", len(tn_list))
             tasks = [asyncio.create_task(worker(tn)) for tn in tn_list]
 
