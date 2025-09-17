@@ -23,7 +23,8 @@ RUN pip install --no-cache-dir "playwright==1.54.*"
 RUN mkdir -p /app/recreacion_linux/out /app/recreacion_linux/logs /app/logs
 
 # Sensible defaults; override via docker-compose env_file or environment section
-ENV HEADLESS=true \
+ENV PYTHONPATH=/app \
+    HEADLESS=true \
     DEBUG_SCRAPER=false \
     BLOCK_RESOURCES=true \
     PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=1 \
