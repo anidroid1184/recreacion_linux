@@ -174,6 +174,8 @@ class AsyncInterScraper:
                         raise
             if not nav_ok:
                 raise RuntimeError("navigation_failed")
+            with suppress(Exception):
+                logging.debug("[PW] [%s] Landed URL: %s", tracking_number, page.url)
 
             # Try to accept cookie banners quickly
             with suppress(Exception):
@@ -210,6 +212,10 @@ class AsyncInterScraper:
             logging.debug("[PW] [%s] Extracting status from %s", tracking_number, "popup" if popup else "page")
             result = await self._extract_status_from_page(target)
             logging.info("[PW] [%-14s] Status: %s", tracking_number, result or "<empty>")
+            if not result:
+                # Capture page state if extraction yielded empty
+                with suppress(Exception):
+                    await self._dump_debug(target, tracking_number, reason="empty")
             return result
         except Exception as e:
             logging.error("[PW] Error for %s: %s", tracking_number, e)
