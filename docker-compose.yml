@@ -17,12 +17,16 @@ services:
       HEADLESS: "true"
       DEBUG_SCRAPER: "false"
       BLOCK_RESOURCES: "true"
+      SLOW_MO: "100"
+      TIMEOUT_MS: "120000"
       PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS: "1"
       TZ: America/Bogota
     # Mount only what is needed (avoid bind-mounting whole repo in prod)
     volumes:
       - ./out:/app/recreacion_linux/out
       - ./logs:/app/recreacion_linux/logs
+      - ./traces:/app/recreacion_linux/traces
       - ./credentials.json:/app/recreacion_linux/credentials.json:ro
       - ./interrapidisimo_traking_map.json:/app/recreacion_linux/interrapidisimo_traking_map.json:ro
-    command: ["bash","-lc","python -V && echo Ready"]
+    # Always execute as a module so imports resolve (recreacion_linux.*)
+    command: ["bash","-lc","python -m recreacion_linux.main --help"]
